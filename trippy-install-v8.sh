@@ -292,7 +292,9 @@ def write_tour_html(job: Path, stops: List[dict], assets: List[dict], settings: 
         raise HTTPException(400, "Need at least two stops for a route tour. Lower the stop radius or select more assets.")
     b = route_bounds([{"lat": s["lat"], "lon": s["lon"]} for s in stops])
     duration_min = float(settings.get("duration_min", 12))
-    mode = settings.get("mode", "earth")
+    # Headless Chromium in Proxmox/LXC can fail to initialize pitched WebGL maps.
+    # Render exports use the stable flat overview path by default.
+    mode = settings.get("mode", "overview")
     pace = settings.get("pace", "smooth")
     title = settings.get("title", "Trippy")
     show_slides = bool(settings.get("show_stop_slides", True))
@@ -362,7 +364,7 @@ const map = new maplibregl.Map({{
   }},
   center: route[0],
   zoom: 3,
-  pitch: mode === 'earth' ? 60 : 35,
+  pitch: 0,
   bearing: 0
 }});
 function easing(t) {{
@@ -402,7 +404,7 @@ map.on('load', () => {{
     map.easeTo({{
       center: coord,
       zoom: mode === 'overview' ? 8 : 11,
-      pitch: mode === 'earth' ? 65 : 45,
+      pitch: 0,
       bearing: isFinite(bearing) ? bearing : 0,
       duration: 0
     }});
@@ -435,7 +437,7 @@ const {{ chromium }} = require('playwright');
   const browser = await chromium.launch({{headless: true, args:['--no-sandbox', '--disable-dev-shm-usage']}});
   const page = await browser.newPage({{ viewport: {{ width: 1920, height: 1080 }}, deviceScaleFactor: 1 }});
   await page.goto('file://{job}/tour.html', {{waitUntil:'networkidle'}});
-  await page.waitForTimeout(3500);
+  await page.waitForTimeout(8000);
   for (let i=0; i<{frames}; i++) {{
     await page.screenshot({{path:`{frames_dir}/frame_${{String(i).padStart(6,'0')}}.png`}});
     await page.waitForTimeout({int(1000/fps)});
@@ -478,7 +480,7 @@ async def project_upload(files: List[UploadFile] = File(...), name: str = Form("
         "created": datetime.utcnow().isoformat(),
         "source": "upload",
         "assets": assets,
-        "settings": {"title": name, "duration_min": 12, "mode": "earth", "pace": "smooth", "stop_radius_m": 200, "show_stop_slides": True},
+        "settings": {"title": name, "duration_min": 12, "mode": "overview", "pace": "smooth", "stop_radius_m": 200, "show_stop_slides": True},
         "stops": auto_cluster_stops(assets, 200) if assets else []
     }
     save_project(project)
@@ -502,7 +504,7 @@ def project_immich(req: ImmichProjectRequest):
         "source": "immich",
         "immich": req.dict(),
         "assets": assets,
-        "settings": {"title": req.name, "duration_min": 12, "mode": "earth", "pace": "smooth", "stop_radius_m": 200, "show_stop_slides": True},
+        "settings": {"title": req.name, "duration_min": 12, "mode": "overview", "pace": "smooth", "stop_radius_m": 200, "show_stop_slides": True},
         "stops": auto_cluster_stops(assets, 200) if assets else []
     }
     save_project(project)
@@ -577,10 +579,13 @@ async def render_project(pid: str, audio: Optional[UploadFile] = File(None)):
         audio_path = job / ("audio_" + Path(audio.filename).name)
         audio_path.write_bytes(await audio.read())
     settings = project.get("settings", {})
-    write_tour_html(job, stops, assets, settings)
-    video = render_video(job, float(settings.get("duration_min", 12)), audio_path)
-    out = EXPORTS / f"trippy-{pid}.mp4"
-    shutil.copy(video, out)
+    try:
+        write_tour_html(job, stops, assets, settings)
+        video = render_video(job, float(settings.get("duration_min", 12)), audio_path)
+        out = EXPORTS / f"trippy-{pid}.mp4"
+        shutil.copy(video, out)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Render failed: {str(e)[-2000:]}")
     project["last_export"] = f"/exports/{out.name}"
     save_project(project)
     return {"download": project["last_export"], "points": len(assets), "stops": len(stops)}
@@ -804,7 +809,7 @@ function hydrate(){
   title.innerText=project.name;
   tourTitle.value=project.settings.title||project.name;
   duration.value=project.settings.duration_min||12;
-  mode.value=project.settings.mode||'earth';
+  mode.value=project.settings.mode||'overview';
   pace.value=project.settings.pace||'smooth';
   stopRadius.value=project.settings.stop_radius_m||200;
   showStopSlides.checked=project.settings.show_stop_slides!==false;
@@ -1115,7 +1120,10 @@ async function render(){
   status('Rendering. Do not refresh this tab.');
   try{
     const r=await fetch(`/api/project/${project.id}/render`,{method:'POST',body:fd});
-    const j=await r.json();
+    const text=await r.text();
+    let j;
+    try{ j=text ? JSON.parse(text) : {}; }
+    catch(_){ j={detail:text || r.statusText || 'Render failed'}; }
     clearInterval(timer);
     renderOverlay.style.display='none';
     if(!r.ok){status('Error: '+(j.detail||JSON.stringify(j))); return;}
@@ -1249,4 +1257,14 @@ echo "  - Recenter stop from grouped photos"
 echo "  - Lasso stop grouping for hikes/large areas"
 echo "  - Stop slideshow cards during route render"
 echo "  - Optional audio upload"
-echo "  - MP4 export"\necho "  - Existing CT update mode"\necho "  - Health check: /api/health"\necho "  - Calendar date picker with autofilled import range"\necho "  - Delete old projects from the UI"\necho "  - Save Immich URL/API key locally in browser"\necho "  - First-run Immich API key setup prompt"\necho "  - Account panel for updating Immich connection"\necho "  - Fixed project deletion with project-list delete buttons"\necho "  - Click stops/images to zoom and filter gallery"\necho "  - Render overlay with animated loading bar"
+echo "  - MP4 export"
+echo "  - Existing CT update mode"
+echo "  - Health check: /api/health"
+echo "  - Calendar date picker with autofilled import range"
+echo "  - Delete old projects from the UI"
+echo "  - Save Immich URL/API key locally in browser"
+echo "  - First-run Immich API key setup prompt"
+echo "  - Account panel for updating Immich connection"
+echo "  - Fixed project deletion with project-list delete buttons"
+echo "  - Click stops/images to zoom and filter gallery"
+echo "  - Render overlay with animated loading bar"
